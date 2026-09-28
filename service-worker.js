@@ -1,32 +1,52 @@
-const CACHE = 'mosaic-dark-v2';
-const ASSETS = [
-  './',
-  './index.html',
-  './style.css',
-  './app.js',
-  './manifest.json',
-  './icon-180.png',
-  './icon-192.png',
-  './icon-512.png'
-];
+'use strict';
+// Change this version whenever publishing an app update.
+const VERSION = '20260929-4.0.0';
+const PREFIX = 'mosaic-app:' + self.registration.scope + ':';
+const CACHE = PREFIX + VERSION;
+const ASSETS = ['./', './index.html', './style.css', './app.js', './manifest.json',
+  './icon-180.png', './icon-192.png', './icon-512.png'];
 
 self.addEventListener('install', event => {
-  event.waitUntil(caches.open(CACHE).then(cache => cache.addAll(ASSETS)));
-  self.skipWaiting();
+  event.waitUntil((async () => {
+    const cache = await caches.open(CACHE);
+    await cache.addAll(ASSETS.map(path => new Request(new URL(path, self.registration.scope), { cache: 'reload' })));
+    // Adopt the legacy worker once; later updates wait for explicit user action.
+    const keys = await caches.keys();
+    if (!keys.some(key => key.startsWith(PREFIX) && key !== CACHE)) await self.skipWaiting();
+  })());
 });
 
 self.addEventListener('activate', event => {
-  event.waitUntil(
-    caches.keys().then(keys =>
-      Promise.all(keys.filter(key => key !== CACHE).map(key => caches.delete(key)))
-    )
-  );
-  self.clients.claim();
+  event.waitUntil((async () => {
+    const keys = await caches.keys();
+    await Promise.all(keys.filter(key => key.startsWith(PREFIX) && key !== CACHE).map(key => caches.delete(key)));
+    // Legacy versions used origin-wide caches. Preserve every other app's entries.
+    for (const name of ['mosaic-v1', 'mosaic-dark-v2']) {
+      if (!keys.includes(name)) continue;
+      const legacy = await caches.open(name);
+      const requests = await legacy.keys();
+      await Promise.all(requests.filter(request => request.url.startsWith(self.registration.scope)).map(request => legacy.delete(request)));
+    }
+    await self.clients.claim();
+  })());
+});
+
+self.addEventListener('message', event => {
+  if (event.data?.type === 'SKIP_WAITING') self.skipWaiting();
+  if (event.data?.type === 'GET_VERSION') event.ports[0]?.postMessage({ version: VERSION });
 });
 
 self.addEventListener('fetch', event => {
-  if (event.request.method !== 'GET') return;
-  event.respondWith(
-    caches.match(event.request).then(cached => cached || fetch(event.request))
-  );
+  const url = new URL(event.request.url);
+  if (event.request.method !== 'GET' || !url.href.startsWith(self.registration.scope)) return;
+  event.respondWith((async () => {
+    const cache = await caches.open(CACHE);
+    const cached = await cache.match(event.request, { ignoreSearch: true });
+    if (cached) return cached;
+    if (event.request.mode === 'navigate') {
+      const shell = await cache.match(new URL('./index.html', self.registration.scope));
+      if (shell) return shell;
+    }
+    return fetch(event.request);
+  })());
 });
